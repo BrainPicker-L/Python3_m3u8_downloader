@@ -1,0 +1,119 @@
+from gevent import monkey
+
+monkey.patch_all()
+from gevent.pool import Pool
+import gevent
+import requests
+from urllib.parse import urljoin
+import os
+import time
+
+
+class Downloader:
+    def __init__(self, pool_size, retry=3):
+        self.pool = Pool(pool_size)
+        self.session = self._get_http_session(pool_size, pool_size, retry)
+        self.retry = retry
+        self.dir = ''
+        self.outfile = ''
+        self.succed = {}
+        self.failed = []
+        self.ts_total = 0
+        self.headers = {}
+
+    def _get_http_session(self, pool_connections, pool_maxsize, max_retries):
+        session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(pool_connections=pool_connections, pool_maxsize=pool_maxsize,
+                                                max_retries=max_retries)
+        session.mount('http://', adapter)
+        session.mount('https://', adapter)
+        return session
+
+    def run(self, m3u8_url, dir='', outfile='', headers={}):
+        print(dir)
+        self.dir = dir
+        self.outfile = outfile.replace(' ', '')
+        self.headers = headers
+        print(headers)
+
+        r = self.session.get(m3u8_url, headers=self.headers, timeout=10)
+        print(r.text)
+        if r.ok:
+            body = r.text
+            with open(os.path.join(self.dir, self.outfile + '.txt'), 'wb') as f:
+                f.write(r.content)
+            f.close()
+            if body:
+                ts_list = [urljoin(m3u8_url, n.strip()) for n in str(body).split('\n') if
+                           n and not n.startswith("#")]
+                ts_list = list(zip(ts_list, [n for n in range(len(ts_list))]))
+                if ts_list:
+                    self.ts_total = len(ts_list)
+                    print(self.ts_total)
+                    g1 = gevent.spawn(self._join_file)
+                    self._download(ts_list)
+                    g1.join()
+
+        else:
+            print(r.status_code)
+
+    def _download(self, ts_list):
+        print(ts_list)
+        self.pool.map(self._worker, ts_list)
+        if self.failed:
+            ts_list = self.failed
+            self.failed = []
+            self._download(ts_list)
+
+    def _worker(self, ts_tuple):
+        url = ts_tuple[0]
+        print(self.headers)
+
+        index = ts_tuple[1]
+
+        retry = self.retry
+        while retry:
+            try:
+                r = self.session.get(url, headers=self.headers, timeout=20)
+                if r.ok:
+                    file_name = '%s_%s.ts' % (self.outfile, index)
+                    print(file_name)
+                    with open(os.path.join(self.dir, file_name), 'wb') as f:
+                        f.write(r.content)
+                        self.succed[index] = file_name
+                        return
+            except:
+                retry -= 1
+        print('[FAIL]%s' % url)
+        self.failed.append((url, index))
+
+    def _join_file(self):
+        index = 0
+        outfile = ''
+        while index < self.ts_total:
+            file_name = self.succed.get(index, '')
+            if file_name:
+                infile = open(os.path.join(self.dir, file_name), 'rb')
+                if not outfile:
+                    outfile = open(os.path.join(self.dir, self.outfile + '.ts'), 'wb')
+                outfile.write(infile.read())
+                infile.close()
+                os.remove(os.path.join(self.dir, file_name))
+                index += 1
+            else:
+                time.sleep(1)
+        if outfile:
+            print("成功写入%s" % (os.path.join(self.dir, self.outfile + '.ts')))
+            outfile.close()
+
+
+if __name__ == "__main__":
+    download_obj = Downloader(10)
+    headers = {
+        "Orgin":"https://v.qq.com",
+        "User-Agent": 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/75.0.3770.80 Safari/537.36'"qqlive",
+    }
+
+    #m3u8地址过期，自己换新的～
+    url = "https://ltsydzd.qq.com/uwMROfz2r5zAoaQXGdGnC2df644E7D3uP8M8pmtgwsRK9nEL/z1RiLXHHFyUexVeHDTKXfPcgGv3KXnWVBUnKteBLWm7Nm1YvCpVkDJR6Olz0zJQopfOAHqJqBdshBJFeghP5SJ2T2JvGdAmKyBE19c_JYMVNPuPGE-eDzfSmAZ3Vd2HiSFTZqg74MR4EJ-huEOS9yO1n1Kl1vd0qRqlK_JMLcM0/o0031sru2es.321002.ts.m3u8?ver=4"
+    download_obj.run(url,'./video',"测试",headers=headers)
